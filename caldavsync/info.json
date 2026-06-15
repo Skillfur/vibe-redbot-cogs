@@ -1,11 +1,12 @@
 {
-    "name": "CaldavSync",
-    "short": "Create Schedule based on CalDAV enties",
-    "description": "Post a message with CalDAV Events on selected Discord channel.",
-    "end_user_data_statement": "This cog stores CalDAV credentials and configuration for the server.",
-    "install_msg": "Thanks for installing my cog! First, set up your credientials with `[p]caldavset server https://your-caldav-server.com/` `[p]caldavset username` `[p]caldavset password` `[p]caldavset channel #channel` .",
     "author": ["SkillFur"],
+    "install_msg": "Thanks for installing CalDAVSync! Use `[p]caldavset` to configure it.",
+    "name": "CalDAVSync",
+    "short": "Sync CalDAV calendar events to a Discord channel.",
+    "description": "Fetches events from a CalDAV server and posts/updates them in a chosen Discord channel every set period.",
+    "tags": ["calendar", "caldav", "events", "schedule"],
     "requirements": ["caldav"],
-    "tags": ["calendar", "utility"],
-    "min_bot_version": "3.5.0"
+    "hidden": false,
+    "disabled": false,
+    "type": "COG"
 }
