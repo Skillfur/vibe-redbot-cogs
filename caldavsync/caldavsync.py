@@ -215,7 +215,3 @@ class CalDAVSync(commands.Cog):
         await ctx.send("Syncing CalDAV events...")
         await self.sync_and_update_message(ctx.guild)
         await ctx.send("✅ Sync complete.")
-
-
-def setup(bot: Red):
-    bot.add_cog(CalDAVSync(bot))
