@@ -1,0 +1,8 @@
+{
+    "author" : ["SkillFur"],
+    "install_msg" : "Thank you for installing my repo! Be aware that these are done with the help of AI, so expect some funky shit going on",
+    "name" : "vibe-redbot-cogs",
+    "short" : "Some cogs for Red Discord Bot!",
+    "description" : "Some cogs for Red Discord Bot!",
+    "tags" : ["utility", "functionalities"]
+}
