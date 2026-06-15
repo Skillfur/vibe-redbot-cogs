@@ -113,11 +113,24 @@ class CalDAVSync(commands.Cog):
         except Exception:
             return []
 
-    async def sync_and_update_message(self, guild: discord.Guild):
+async def sync_and_update_message(self, guild: discord.Guild):
+    self.logger.info(f"Starting CalDAV sync for guild {guild.id}")
+
+    try:
         server = await self.config.guild(guild).server()
         username = await self.config.guild(guild).username() or ""
         password = await self.config.guild(guild).password()
+        channel_id = await self.config.guild(guild).channel()
 
+        if not server or not password:
+            self.logger.warning("CalDAV server or password not configured.")
+            return
+
+        if not channel_id:
+            self.logger.warning("No channel configured for this guild.")
+            return
+
+        # Fetch events
         events_list = await self.bot.loop.run_in_executor(
             None, self._fetch_events_sync, server, username, password
         )
@@ -128,33 +141,46 @@ class CalDAVSync(commands.Cog):
             formatted = [f"<t:{unix_ts}:F> `{summary}`" for unix_ts, summary in events_list]
             content = "\n\n".join(formatted)
 
-        channel_id = await self.config.guild(guild).channel()
-        if not channel_id:
+        # Get channel
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception as e:
+                self.logger.error(f"Could not fetch channel {channel_id}: {e}")
+                return
+
+        # Check permissions
+        if not channel.permissions_for(guild.me).send_messages:
+            self.logger.error(f"Missing 'Send Messages' permission in channel {channel.id}")
             return
 
-        try:
-            channel = guild.get_channel(channel_id) or await self.bot.fetch_channel(channel_id)
-        except Exception:
-            return
-
+        # Try to edit existing message or create new one
         message_id = await self.config.guild(guild).messageID()
 
         if message_id:
             try:
                 msg = await channel.fetch_message(message_id)
                 await msg.edit(content=content[:2000])
+                self.logger.info("Existing message updated successfully.")
                 return
-            except (discord.NotFound, discord.Forbidden):
-                pass
-            except Exception:
-                pass
+            except discord.NotFound:
+                self.logger.info("Saved message ID not found, creating new message.")
+            except Exception as e:
+                self.logger.error(f"Failed to edit message: {e}")
 
         # Create new message
         try:
             new_msg = await channel.send(content[:2000])
             await self.config.guild(guild).messageID.set(new_msg.id)
-        except Exception:
-            pass
+            self.logger.info(f"New message created with ID {new_msg.id}")
+        except discord.Forbidden:
+            self.logger.error("Bot is missing permissions to send messages in this channel.")
+        except Exception as e:
+            self.logger.error(f"Failed to send message: {e}")
+
+    except Exception as e:
+        self.logger.exception(f"Unexpected error during CalDAV sync: {e}")
 
     # ==================== COMMANDS ====================
     @commands.group(name="caldavset", invoke_without_command=True)
