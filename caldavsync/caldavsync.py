@@ -8,7 +8,7 @@ from datetime import datetime, date, timedelta, timezone
 
 
 class CalDAVSync(commands.Cog):
-    """Syncs CalDAV calendar events to a Discord channel (next 7 days)."""
+    """Syncs CalDAV calendar events to a Discord channel."""
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -21,6 +21,7 @@ class CalDAVSync(commands.Cog):
             "channel": None,
             "messageID": None,
             "period": "1h",
+            "days": 7,                    # NEW: Number of days to look ahead
         }
         self.config.register_guild(**default_guild)
 
@@ -67,7 +68,7 @@ class CalDAVSync(commands.Cog):
             return 3600
 
     # ==================== CORE LOGIC ====================
-    def _fetch_events_sync(self, server: str, username: str, password: str):
+    def _fetch_events_sync(self, server: str, username: str, password: str, days: int):
         if not server or not password:
             return []
 
@@ -77,9 +78,11 @@ class CalDAVSync(commands.Cog):
             calendars = client.get_calendars(principal=principal)
 
             today = datetime.now(timezone.utc).date()
-            end_date = today + timedelta(days=7)
+            end_date = today + timedelta(days=days)
+            now = datetime.now(timezone.utc)
 
             events_list = []
+
             for cal in calendars:
                 try:
                     evs = cal.search(
@@ -88,30 +91,50 @@ class CalDAVSync(commands.Cog):
                         end=end_date,
                         expand=True
                     )
+
                     for ev in evs:
                         comp = ev.get_icalendar_component()
                         summary = str(comp.get("summary", "Untitled Event"))
 
                         dtstart_obj = comp.get("dtstart")
-                        if dtstart_obj:
-                            dt = dtstart_obj.dt
-                            if isinstance(dt, date) and not isinstance(dt, datetime):
-                                dt = datetime.combine(dt, datetime.min.time(), tzinfo=timezone.utc)
-                            elif isinstance(dt, datetime):
-                                if dt.tzinfo is None:
-                                    dt = dt.replace(tzinfo=timezone.utc)
-                                else:
-                                    dt = dt.astimezone(timezone.utc)
-                            unix_ts = int(dt.timestamp())
-                        else:
-                            unix_ts = int(datetime.now(timezone.utc).timestamp())
+                        if not dtstart_obj:
+                            continue
 
-                        events_list.append((unix_ts, summary))
-                except Exception:
+                        start_dt = dtstart_obj.dt
+                        if isinstance(start_dt, date) and not isinstance(start_dt, datetime):
+                            start_dt = datetime.combine(start_dt, datetime.min.time(), tzinfo=timezone.utc)
+                        elif isinstance(start_dt, datetime):
+                            if start_dt.tzinfo is None:
+                                start_dt = start_dt.replace(tzinfo=timezone.utc)
+                            else:
+                                start_dt = start_dt.astimezone(timezone.utc)
+
+                        # Get end time for filtering past events
+                        dtend_obj = comp.get("dtend")
+                        if dtend_obj:
+                            end_dt = dtend_obj.dt
+                            if isinstance(end_dt, date) and not isinstance(end_dt, datetime):
+                                end_dt = datetime.combine(end_dt, datetime.max.time(), tzinfo=timezone.utc)
+                            elif isinstance(end_dt, datetime):
+                                if end_dt.tzinfo is None:
+                                    end_dt = end_dt.replace(tzinfo=timezone.utc)
+                                else:
+                                    end_dt = end_dt.astimezone(timezone.utc)
+                        else:
+                            end_dt = start_dt + timedelta(hours=1)
+
+                        # Only include events that haven't ended yet
+                        if end_dt > now:
+                            unix_ts = int(start_dt.timestamp())
+                            events_list.append((unix_ts, summary))
+
+                except Exception as e:
+                    self.logger.debug(f"Error processing calendar: {e}")
                     continue
 
             events_list.sort(key=lambda x: x[0])
             return events_list
+
         except Exception as e:
             self.logger.error(f"CalDAV fetch error: {e}")
             return []
@@ -124,6 +147,7 @@ class CalDAVSync(commands.Cog):
             username = await self.config.guild(guild).username() or ""
             password = await self.config.guild(guild).password()
             channel_id = await self.config.guild(guild).channel()
+            days = await self.config.guild(guild).days()   # NEW
 
             if not server or not password:
                 self.logger.warning("CalDAV server or password not configured.")
@@ -133,13 +157,12 @@ class CalDAVSync(commands.Cog):
                 self.logger.warning("No channel configured for this guild.")
                 return
 
-            # Fetch events
             events_list = await self.bot.loop.run_in_executor(
-                None, self._fetch_events_sync, server, username, password
+                None, self._fetch_events_sync, server, username, password, days
             )
 
             if not events_list:
-                content = "No events found in the next 7 days."
+                content = f"No upcoming events in the next {days} days."
             else:
                 formatted = [f"<t:{unix_ts}:F> `{summary}`" for unix_ts, summary in events_list]
                 content = "\n\n".join(formatted)
@@ -153,12 +176,10 @@ class CalDAVSync(commands.Cog):
                     self.logger.error(f"Could not fetch channel {channel_id}: {e}")
                     return
 
-            # Check permissions
             if not channel.permissions_for(guild.me).send_messages:
                 self.logger.error(f"Missing 'Send Messages' permission in channel {channel.id}")
                 return
 
-            # Try to edit existing message
             message_id = await self.config.guild(guild).messageID()
 
             if message_id:
@@ -172,7 +193,6 @@ class CalDAVSync(commands.Cog):
                 except Exception as e:
                     self.logger.error(f"Failed to edit message: {e}")
 
-            # Create new message
             try:
                 new_msg = await channel.send(content[:2000])
                 await self.config.guild(guild).messageID.set(new_msg.id)
@@ -222,6 +242,15 @@ class CalDAVSync(commands.Cog):
             await ctx.send(f"✅ Sync period set to `{period}`.")
         except Exception:
             await ctx.send("Invalid format. Use `1h`, `30m`, or seconds (e.g. `3600`).")
+
+    @caldavset.command(name="days")
+    async def set_days(self, ctx, days: int):
+        """Set how many days ahead to fetch events (default: 7)."""
+        if days < 1:
+            await ctx.send("The number of days must be at least 1.")
+            return
+        await self.config.guild(ctx.guild).days.set(days)
+        await ctx.send(f"✅ Number of days set to **{days}**.")
 
     @caldavset.command(name="messageid")
     async def set_messageid(self, ctx, message_id: int = None):
