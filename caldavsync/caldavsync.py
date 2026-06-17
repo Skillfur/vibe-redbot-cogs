@@ -21,7 +21,7 @@ class CalDAVSync(commands.Cog):
             "channel": None,
             "messageID": None,
             "period": "1h",
-            "days": 7,                    # NEW: Number of days to look ahead
+            "days": 7,
         }
         self.config.register_guild(**default_guild)
 
@@ -96,6 +96,9 @@ class CalDAVSync(commands.Cog):
                         comp = ev.get_icalendar_component()
                         summary = str(comp.get("summary", "Untitled Event"))
 
+                        # Get description (raw)
+                        description = str(comp.get("description", "")).strip()
+
                         dtstart_obj = comp.get("dtstart")
                         if not dtstart_obj:
                             continue
@@ -109,7 +112,6 @@ class CalDAVSync(commands.Cog):
                             else:
                                 start_dt = start_dt.astimezone(timezone.utc)
 
-                        # Get end time for filtering past events
                         dtend_obj = comp.get("dtend")
                         if dtend_obj:
                             end_dt = dtend_obj.dt
@@ -123,10 +125,9 @@ class CalDAVSync(commands.Cog):
                         else:
                             end_dt = start_dt + timedelta(hours=1)
 
-                        # Only include events that haven't ended yet
                         if end_dt > now:
                             unix_ts = int(start_dt.timestamp())
-                            events_list.append((unix_ts, summary))
+                            events_list.append((unix_ts, summary, description))
 
                 except Exception as e:
                     self.logger.debug(f"Error processing calendar: {e}")
@@ -147,7 +148,7 @@ class CalDAVSync(commands.Cog):
             username = await self.config.guild(guild).username() or ""
             password = await self.config.guild(guild).password()
             channel_id = await self.config.guild(guild).channel()
-            days = await self.config.guild(guild).days()   # NEW
+            days = await self.config.guild(guild).days()
 
             if not server or not password:
                 self.logger.warning("CalDAV server or password not configured.")
@@ -164,10 +165,14 @@ class CalDAVSync(commands.Cog):
             if not events_list:
                 content = f"No upcoming events in the next {days} days."
             else:
-                formatted = [f"<t:{unix_ts}:F> `{summary}`" for unix_ts, summary in events_list]
+                formatted = []
+                for unix_ts, summary, description in events_list:
+                    block = f"<t:{unix_ts}:F>\n`{summary}`"
+                    if description:
+                        block += f"\n{description}"
+                    formatted.append(block)
                 content = "\n\n".join(formatted)
 
-            # Get channel
             channel = guild.get_channel(channel_id)
             if channel is None:
                 try:
@@ -212,6 +217,26 @@ class CalDAVSync(commands.Cog):
         """Configure CalDAV sync settings."""
         await ctx.send_help(ctx.command)
 
+    @caldavset.command(name="show")
+    async def show_settings(self, ctx):
+        """Show current CalDAV settings."""
+        data = await self.config.guild(ctx.guild).all()
+
+        channel = ctx.guild.get_channel(data.get("channel")) if data.get("channel") else None
+        channel_mention = channel.mention if channel else "Not set"
+
+        password_status = "Set" if data.get("password") else "Not set"
+
+        embed = discord.Embed(title="CalDAV Sync Settings", color=discord.Color.blue())
+        embed.add_field(name="Server", value=data.get("server") or "Not set", inline=False)
+        embed.add_field(name="Username", value=data.get("username") or "Not set", inline=True)
+        embed.add_field(name="Password", value=password_status, inline=True)
+        embed.add_field(name="Channel", value=channel_mention, inline=False)
+        embed.add_field(name="Period", value=data.get("period", "1h"), inline=True)
+        embed.add_field(name="Days Ahead", value=str(data.get("days", 7)), inline=True)
+
+        await ctx.send(embed=embed)
+
     @caldavset.command(name="server")
     async def set_server(self, ctx, *, url: str):
         await self.config.guild(ctx.guild).server.set(url.strip())
@@ -245,7 +270,6 @@ class CalDAVSync(commands.Cog):
 
     @caldavset.command(name="days")
     async def set_days(self, ctx, days: int):
-        """Set how many days ahead to fetch events (default: 7)."""
         if days < 1:
             await ctx.send("The number of days must be at least 1.")
             return
@@ -264,7 +288,6 @@ class CalDAVSync(commands.Cog):
     @commands.command(name="caldav")
     @commands.admin_or_permissions(manage_guild=True)
     async def force_sync(self, ctx):
-        """Force an immediate CalDAV sync and message update."""
         data = await self.config.guild(ctx.guild).all()
         if not (data.get("server") and data.get("password") and data.get("channel")):
             await ctx.send("Please configure `server`, `password`, and `channel` first using `caldavset` commands.")
