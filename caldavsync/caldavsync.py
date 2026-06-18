@@ -95,8 +95,6 @@ class CalDAVSync(commands.Cog):
                     for ev in evs:
                         comp = ev.get_icalendar_component()
                         summary = str(comp.get("summary", "Untitled Event"))
-
-                        # Get description (raw)
                         description = str(comp.get("description", "")).strip()
 
                         dtstart_obj = comp.get("dtstart")
@@ -167,7 +165,8 @@ class CalDAVSync(commands.Cog):
             else:
                 formatted = []
                 for unix_ts, summary, description in events_list:
-                    block = f"<t:{unix_ts}:F>\n`{summary}`"
+                    # New format with ## heading
+                    block = f"## <t:{unix_ts}:F>\n`{summary}`"
                     if description:
                         block += f"\n{description}"
                     formatted.append(block)
