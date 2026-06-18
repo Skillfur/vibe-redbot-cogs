@@ -159,11 +159,11 @@ class CalDAVSync(commands.Cog):
         else:
             formatted = []
             for unix_ts, summary, description in events_list:
-                block = f"### <t:{unix_ts}:F>\n`{summary}`"
+                block = f"<t:{unix_ts}:F>\n`{summary}`"
                 if description:
                     block += f"\n{description}"
                 formatted.append(block)
-            content = "``` ```".join(formatted)
+            content = "``` ``` ".join(formatted)
 
         if not channel.permissions_for(guild.me).send_messages:
             return
