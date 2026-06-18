@@ -163,7 +163,7 @@ class CalDAVSync(commands.Cog):
                 if description:
                     block += f"\n{description}"
                 formatted.append(block)
-            content = "\n``` ```\n".join(formatted)
+            content = "``` ```".join(formatted)
 
         if not channel.permissions_for(guild.me).send_messages:
             return
