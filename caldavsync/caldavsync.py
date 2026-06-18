@@ -8,7 +8,8 @@ from datetime import datetime, date, timedelta, timezone
 
 
 class CalDAVSync(commands.Cog):
-    """Syncs CalDAV calendar events to Discord channels with per-channel configuration."""
+    """Syncs CalDAV calendar events to Discord channels. 
+    Channels only sync when specific calendars are configured."""
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -22,7 +23,7 @@ class CalDAVSync(commands.Cog):
         self.config.register_guild(**default_guild)
 
         default_channel = {
-            "calendars": [],
+            "calendars": [],      # Empty = do not sync anything (new default)
             "days": 7,
             "period": "1h",
             "messageID": None,
@@ -48,7 +49,9 @@ class CalDAVSync(commands.Cog):
 
                 for channel in guild.text_channels:
                     ch_data = await self.config.channel(channel).all()
-                    if not ch_data.get("messageID") and not ch_data.get("calendars"):
+
+                    # Only process channels that have calendars configured
+                    if not ch_data.get("calendars"):
                         continue
 
                     period_sec = self.parse_period(ch_data.get("period", "1h"))
@@ -81,6 +84,10 @@ class CalDAVSync(commands.Cog):
         if not server or not password:
             return []
 
+        # If no calendars are configured, return nothing
+        if not allowed_calendars:
+            return []
+
         try:
             client = caldav.DAVClient(url=server, username=username or "", password=password)
             principal = client.get_principal()
@@ -95,7 +102,7 @@ class CalDAVSync(commands.Cog):
             for cal in all_calendars:
                 cal_name = cal.get_display_name() or getattr(cal, "name", str(cal.url).split("/")[-1])
 
-                if allowed_calendars and cal_name not in allowed_calendars:
+                if cal_name not in allowed_calendars:
                     continue
 
                 try:
@@ -147,7 +154,7 @@ class CalDAVSync(commands.Cog):
         days = ch_data.get("days", 7)
         allowed_calendars = ch_data.get("calendars", [])
 
-        if not server or not password:
+        if not server or not password or not allowed_calendars:
             return
 
         events_list = await self.bot.loop.run_in_executor(
@@ -181,27 +188,18 @@ class CalDAVSync(commands.Cog):
             new_msg = await channel.send(content[:2000])
             await self.config.channel(channel).messageID.set(new_msg.id)
         except Exception as e:
-            self.logger.error(f"Failed to send message: {e}")
+            self.logger.error(f"Failed to send: {e}")
 
     # ==================== COMMANDS ====================
     @commands.group(name="caldavset", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
     async def caldavset(self, ctx, channel: discord.TextChannel = None, *, setting: str = None):
-        """
-        Configure CalDAV per channel.
-        Usage:
-        [p]caldavset #channel calendars Work,Personal
-        [p]caldavset #channel days 14
-        [p]caldavset days 7
-        """
-
         if channel is None:
             channel = ctx.channel
 
         if setting is None:
-            # Show current channel settings
             data = await self.config.channel(channel).all()
-            cal_list = ", ".join(data.get("calendars", [])) or "All calendars"
+            cal_list = ", ".join(data.get("calendars", [])) or "None (not syncing)"
             embed = discord.Embed(title=f"Settings for {channel.mention}", color=discord.Color.blue())
             embed.add_field(name="Calendars", value=cal_list, inline=False)
             embed.add_field(name="Days", value=data.get("days", 7), inline=True)
@@ -209,16 +207,18 @@ class CalDAVSync(commands.Cog):
             await ctx.send(embed=embed)
             return
 
-        # Parse setting
         parts = setting.split(maxsplit=1)
         key = parts[0].lower()
         value = parts[1] if len(parts) > 1 else ""
 
         if key == "calendars":
-            calendars = [c.strip() for c in value.split(",")] if value else []
-            await self.config.channel(channel).calendars.set(calendars)
-            msg = f"Set to: {', '.join(calendars)}" if calendars else "Now showing **all** calendars"
-            await ctx.send(f"✅ Calendars for {channel.mention}: {msg}")
+            if value.lower() in ["all", "everything"]:
+                await self.config.channel(channel).calendars.set([])
+                await ctx.send(f"✅ {channel.mention} will now show **all** calendars.")
+            else:
+                calendars = [c.strip() for c in value.split(",") if c.strip()]
+                await self.config.channel(channel).calendars.set(calendars)
+                await ctx.send(f"✅ Calendars for {channel.mention} set to: {', '.join(calendars)}")
 
         elif key == "days":
             try:
@@ -226,7 +226,7 @@ class CalDAVSync(commands.Cog):
                 await self.config.channel(channel).days.set(days)
                 await ctx.send(f"✅ Days for {channel.mention} set to **{days}**.")
             except ValueError:
-                await ctx.send("Please provide a valid number for days.")
+                await ctx.send("Please provide a valid number.")
 
         elif key == "period":
             await self.config.channel(channel).period.set(value.strip())
@@ -237,14 +237,11 @@ class CalDAVSync(commands.Cog):
 
     @caldavset.command(name="show")
     async def show_all(self, ctx):
-        """Show guild + all channel settings."""
         guild_data = await self.config.guild(ctx.guild).all()
-
         embed = discord.Embed(title="CalDAV Configuration", color=discord.Color.blue())
         embed.add_field(name="Server", value=guild_data.get("server") or "Not set", inline=False)
         embed.add_field(name="Username", value=guild_data.get("username") or "Not set", inline=True)
         embed.add_field(name="Password", value="Set" if guild_data.get("password") else "Not set", inline=True)
-
         await ctx.send(embed=embed)
 
     @caldavset.command(name="server")
@@ -270,7 +267,12 @@ class CalDAVSync(commands.Cog):
 
         guild_data = await self.config.guild(ctx.guild).all()
         if not (guild_data.get("server") and guild_data.get("password")):
-            await ctx.send("Please configure server and password first.")
+            await ctx.send("Please set server and password first.")
+            return
+
+        ch_data = await self.config.channel(channel).all()
+        if not ch_data.get("calendars"):
+            await ctx.send(f"{channel.mention} has no calendars configured yet.")
             return
 
         await ctx.send(f"Syncing {channel.mention}...")
