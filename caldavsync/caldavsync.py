@@ -8,8 +8,7 @@ from datetime import datetime, date, timedelta, timezone
 
 
 class CalDAVSync(commands.Cog):
-    """Syncs CalDAV calendar events to Discord channels. 
-    Channels only sync when specific calendars are configured."""
+    """Syncs CalDAV calendar events to Discord channels."""
 
     def __init__(self, bot: Red):
         self.bot = bot
@@ -23,7 +22,7 @@ class CalDAVSync(commands.Cog):
         self.config.register_guild(**default_guild)
 
         default_channel = {
-            "calendars": [],      # Empty = do not sync anything (new default)
+            "calendars": [],
             "days": 7,
             "period": "1h",
             "messageID": None,
@@ -49,8 +48,6 @@ class CalDAVSync(commands.Cog):
 
                 for channel in guild.text_channels:
                     ch_data = await self.config.channel(channel).all()
-
-                    # Only process channels that have calendars configured
                     if not ch_data.get("calendars"):
                         continue
 
@@ -81,11 +78,7 @@ class CalDAVSync(commands.Cog):
 
     # ==================== CORE LOGIC ====================
     def _fetch_events_sync(self, server: str, username: str, password: str, days: int, allowed_calendars: list):
-        if not server or not password:
-            return []
-
-        # If no calendars are configured, return nothing
-        if not allowed_calendars:
+        if not server or not password or not allowed_calendars:
             return []
 
         try:
@@ -259,25 +252,73 @@ class CalDAVSync(commands.Cog):
         await self.config.guild(ctx.guild).password.set(password)
         await ctx.send("✅ Password set.")
 
-    @commands.command(name="caldav")
+    # ==================== NEW: List Calendars Command ====================
+    @commands.group(name="caldav", invoke_without_command=True)
     @commands.admin_or_permissions(manage_guild=True)
-    async def force_sync(self, ctx, channel: discord.TextChannel = None):
+    async def caldav(self, ctx, channel: discord.TextChannel = None):
+        """Force sync a channel or use subcommands."""
         if channel is None:
             channel = ctx.channel
 
         guild_data = await self.config.guild(ctx.guild).all()
         if not (guild_data.get("server") and guild_data.get("password")):
-            await ctx.send("Please set server and password first.")
+            await ctx.send("Please configure server and password first using `caldavset`.")
             return
 
         ch_data = await self.config.channel(channel).all()
         if not ch_data.get("calendars"):
-            await ctx.send(f"{channel.mention} has no calendars configured yet.")
+            await ctx.send(f"{channel.mention} has no calendars configured.")
             return
 
         await ctx.send(f"Syncing {channel.mention}...")
         await self.sync_and_update_message(channel)
-        await ctx.send("✅ Done.")
+        await ctx.send("✅ Sync complete.")
+
+    @caldav.command(name="calendars")
+    async def list_calendars(self, ctx):
+        """List all available calendars from your CalDAV server."""
+        guild_data = await self.config.guild(ctx.guild).all()
+        server = guild_data.get("server")
+        username = guild_data.get("username") or ""
+        password = guild_data.get("password")
+
+        if not server or not password:
+            await ctx.send("Please set your CalDAV server and password first using `caldavset server` and `caldavset password`.")
+            return
+
+        await ctx.send("Fetching calendars from server...")
+
+        def fetch_calendars():
+            try:
+                client = caldav.DAVClient(url=server, username=username, password=password)
+                principal = client.get_principal()
+                calendars = client.get_calendars(principal=principal)
+
+                result = []
+                for cal in calendars:
+                    name = cal.get_display_name() or getattr(cal, "name", str(cal.url).split("/")[-1])
+                    result.append(name)
+                return result
+            except Exception as e:
+                return f"Error: {e}"
+
+        calendars = await self.bot.loop.run_in_executor(None, fetch_calendars)
+
+        if isinstance(calendars, str):
+            await ctx.send(calendars)
+            return
+
+        if not calendars:
+            await ctx.send("No calendars found on this server.")
+            return
+
+        embed = discord.Embed(
+            title="Available CalDAV Calendars",
+            description="\n".join(f"• `{name}`" for name in calendars),
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Use these names with: caldavset #channel calendars Name1,Name2")
+        await ctx.send(embed=embed)
 
 
 def setup(bot: Red):
