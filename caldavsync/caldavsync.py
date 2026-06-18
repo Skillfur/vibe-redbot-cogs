@@ -22,6 +22,7 @@ class CalDAVSync(commands.Cog):
             "messageID": None,
             "period": "1h",
             "days": 7,
+            "use_embed": False,          # NEW: Embed mode toggle
         }
         self.config.register_guild(**default_guild)
 
@@ -147,6 +148,7 @@ class CalDAVSync(commands.Cog):
             password = await self.config.guild(guild).password()
             channel_id = await self.config.guild(guild).channel()
             days = await self.config.guild(guild).days()
+            use_embed = await self.config.guild(guild).use_embed()   # NEW
 
             if not server or not password:
                 self.logger.warning("CalDAV server or password not configured.")
@@ -160,54 +162,91 @@ class CalDAVSync(commands.Cog):
                 None, self._fetch_events_sync, server, username, password, days
             )
 
+            # ===================== EMBED MODE =====================
+            if use_embed:
+                if not events_list:
+                    content = None
+                    embed = discord.Embed(
+                        title=f"No upcoming events in the next {days} days",
+                        color=discord.Color.orange()
+                    )
+                else:
+                    embed = discord.Embed(
+                        title=f"Upcoming Events (Next {days} days)",
+                        color=discord.Color.blue()
+                    )
+                    for unix_ts, summary, description in events_list:
+                        value = f"`{summary}`"
+                        if description:
+                            value += f"\n{description}"
+                        embed.add_field(
+                            name=f"## <t:{unix_ts}:F>",
+                            value=value,
+                            inline=False
+                        )
+                # Send or edit embed
+                await self._send_or_edit_message(guild, channel_id, None, embed)
+                return
+
+            # ===================== PLAIN TEXT MODE =====================
             if not events_list:
                 content = f"No upcoming events in the next {days} days."
             else:
                 formatted = []
                 for unix_ts, summary, description in events_list:
-                    # New format with ## heading
                     block = f"## <t:{unix_ts}:F>\n`{summary}`"
                     if description:
                         block += f"\n{description}"
                     formatted.append(block)
                 content = "\n\n".join(formatted)
 
-            channel = guild.get_channel(channel_id)
-            if channel is None:
-                try:
-                    channel = await self.bot.fetch_channel(channel_id)
-                except Exception as e:
-                    self.logger.error(f"Could not fetch channel {channel_id}: {e}")
-                    return
-
-            if not channel.permissions_for(guild.me).send_messages:
-                self.logger.error(f"Missing 'Send Messages' permission in channel {channel.id}")
-                return
-
-            message_id = await self.config.guild(guild).messageID()
-
-            if message_id:
-                try:
-                    msg = await channel.fetch_message(message_id)
-                    await msg.edit(content=content[:2000])
-                    self.logger.info("Existing message updated successfully.")
-                    return
-                except discord.NotFound:
-                    self.logger.info("Saved message ID not found, creating new message.")
-                except Exception as e:
-                    self.logger.error(f"Failed to edit message: {e}")
-
-            try:
-                new_msg = await channel.send(content[:2000])
-                await self.config.guild(guild).messageID.set(new_msg.id)
-                self.logger.info(f"New message created with ID {new_msg.id}")
-            except discord.Forbidden:
-                self.logger.error("Bot is missing permissions to send messages in this channel.")
-            except Exception as e:
-                self.logger.error(f"Failed to send message: {e}")
+            await self._send_or_edit_message(guild, channel_id, content, None)
 
         except Exception as e:
             self.logger.exception(f"Unexpected error during CalDAV sync: {e}")
+
+    async def _send_or_edit_message(self, guild, channel_id, content, embed):
+        """Helper to send or edit message (used by both modes)"""
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception as e:
+                self.logger.error(f"Could not fetch channel {channel_id}: {e}")
+                return
+
+        if not channel.permissions_for(guild.me).send_messages:
+            self.logger.error(f"Missing 'Send Messages' permission in channel {channel.id}")
+            return
+
+        message_id = await self.config.guild(guild).messageID()
+
+        if message_id:
+            try:
+                msg = await channel.fetch_message(message_id)
+                if embed:
+                    await msg.edit(content=None, embed=embed)
+                else:
+                    await msg.edit(content=content[:2000], embed=None)
+                self.logger.info("Existing message updated successfully.")
+                return
+            except discord.NotFound:
+                self.logger.info("Saved message ID not found, creating new message.")
+            except Exception as e:
+                self.logger.error(f"Failed to edit message: {e}")
+
+        # Create new message
+        try:
+            if embed:
+                new_msg = await channel.send(embed=embed)
+            else:
+                new_msg = await channel.send(content[:2000])
+            await self.config.guild(guild).messageID.set(new_msg.id)
+            self.logger.info(f"New message created with ID {new_msg.id}")
+        except discord.Forbidden:
+            self.logger.error("Bot is missing permissions to send messages in this channel.")
+        except Exception as e:
+            self.logger.error(f"Failed to send message: {e}")
 
     # ==================== COMMANDS ====================
     @commands.group(name="caldavset", invoke_without_command=True)
@@ -225,6 +264,7 @@ class CalDAVSync(commands.Cog):
         channel_mention = channel.mention if channel else "Not set"
 
         password_status = "Set" if data.get("password") else "Not set"
+        embed_status = "Enabled" if data.get("use_embed") else "Disabled"
 
         embed = discord.Embed(title="CalDAV Sync Settings", color=discord.Color.blue())
         embed.add_field(name="Server", value=data.get("server") or "Not set", inline=False)
@@ -233,8 +273,16 @@ class CalDAVSync(commands.Cog):
         embed.add_field(name="Channel", value=channel_mention, inline=False)
         embed.add_field(name="Period", value=data.get("period", "1h"), inline=True)
         embed.add_field(name="Days Ahead", value=str(data.get("days", 7)), inline=True)
+        embed.add_field(name="Use Embed", value=embed_status, inline=True)
 
         await ctx.send(embed=embed)
+
+    @caldavset.command(name="embed")
+    async def set_embed(self, ctx, value: bool):
+        """Enable or disable embed mode (true/false)."""
+        await self.config.guild(ctx.guild).use_embed.set(value)
+        status = "enabled" if value else "disabled"
+        await ctx.send(f"✅ Embed mode has been **{status}**.")
 
     @caldavset.command(name="server")
     async def set_server(self, ctx, *, url: str):
